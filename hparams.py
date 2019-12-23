@@ -16,6 +16,7 @@ hparams = tf.contrib.training.HParams(
     prefetch_batch_size=4*batch_size,
     shuffle_batch_size= 32, #shuffle * extractron_batch_size
 
+    bidirection=True,
     add_l1_loss=False,
 
     # If you only have 1 GPU or want to use only one GPU, please set num_gpus=0 and specify the GPU idx on run. example:
@@ -97,6 +98,7 @@ hparams = tf.contrib.training.HParams(
     ####trim_top_db = 60,
 
     n_fft = 1200,
+    num_mels = 80,
     num_freq = 601, # n_fft//2 + 1
     sample_rate = 16000,
     hop_length = 160,
@@ -269,7 +271,7 @@ hparams = tf.contrib.training.HParams(
     # Can be ('constant' or 'scheduled'). 'scheduled' mode applies a cosine teacher forcing ratio decay. (Preference: scheduled)
     extractron_teacher_forcing_mode='constant',
     # Value from [0., 1.], 0.=0%, 1.=100%, determines the % of times we force next decoder inputs, Only relevant if mode='constant'
-    extractron_teacher_forcing_ratio=1.,
+    extractron_teacher_forcing_ratio=0.,
     # initial teacher forcing ratio. Relevant if mode='scheduled'
     extractron_teacher_forcing_init_ratio=1.,
     # final teacher forcing ratio. Relevant if mode='scheduled'

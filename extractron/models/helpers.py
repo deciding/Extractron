@@ -8,7 +8,7 @@ class ExtractTestHelper(Helper):
     def __init__(self, batch_size, stop_length, mixed_spec, spkid_embedding, hparams):
         with tf.name_scope('ExtractTestHelper'):
             self._batch_size = batch_size
-            self._output_dim = hparams.num_freq
+            self._output_dim = hparams.num_mels
             self._length = stop_length
             self._mixed_spec = mixed_spec
             self._spkid_embedding = spkid_embedding
@@ -55,7 +55,7 @@ class ExtractTrainingHelper(Helper):
         # inputs is [N, T_in], targets is [N, T_out, D]
         with tf.name_scope('ExtractTrainingHelper'):
             self._batch_size = batch_size
-            self._output_dim = hparams.num_freq
+            self._output_dim = hparams.num_mels
             self._ratio = tf.convert_to_tensor(
                 hparams.extractron_teacher_forcing_ratio)
             self._hparams = hparams

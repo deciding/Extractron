@@ -8,6 +8,8 @@ from hparams import hparams
 from infolog import log
 from extractron.train import extractron_train
 
+#python train.py --dataset xyz_mel --eval_dataset xyz_mel_test --name extractron_mel_bi
+
 def save_seq(file, sequence, input_path):
     '''Save Extractron training state to disk. (To skip for future runs)
     '''

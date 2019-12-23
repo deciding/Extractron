@@ -3,13 +3,15 @@ import glob
 import tqdm
 import torch
 import random
+random.seed(1234)
 import librosa
 import argparse
 import numpy as np
 from multiprocessing import Pool, cpu_count
 
-from utils.audio import Audio
+from datasets.voicefilter_audio import Audio
 from utils.hparams import HParam
+from hparams import hparams as extractron_hp
 
 
 def formatter(dir_, form, num):
@@ -72,6 +74,14 @@ def mix(hp, args, audio, num, s1_dvec, s1_target, s2, train):
     mixed_mag_path = formatter(dir_, hp.form.mixed.mag, num)
     torch.save(torch.from_numpy(target_mag), target_mag_path)
     torch.save(torch.from_numpy(mixed_mag), mixed_mag_path)
+
+    # save mel spectrograms
+    target_mel = audio.wav2mel(w1)
+    mixed_mel = audio.wav2mel(mixed)
+    target_mel_path = formatter(dir_, hp.form.target.mel, num)
+    mixed_mel_path = formatter(dir_, hp.form.mixed.mel, num)
+    torch.save(torch.from_numpy(target_mel), target_mel_path)
+    torch.save(torch.from_numpy(mixed_mel), mixed_mel_path)
 
     if args.need_phase:
         target_phase_path = formatter(dir_, hp.form.target.phase, num)
@@ -140,7 +150,7 @@ if __name__ == '__main__':
                     for spk in test_folders]
     test_spk = [x for x in test_spk if len(x) >= 2]
 
-    audio = Audio(hp)
+    audio = Audio(extractron_hp)
 
     def train_wrapper(num):
         spk1, spk2 = random.sample(train_spk, 2)
@@ -154,10 +164,10 @@ if __name__ == '__main__':
         s2 = random.choice(spk2)
         mix(hp, args, audio, num, s1_dvec, s1_target, s2, train=False)
 
-    #arr = list(range(10**5))
-    #with Pool(cpu_num) as p:
-    #    r = list(tqdm.tqdm(p.imap(train_wrapper, arr), total=len(arr)))
-
-    arr = list(range(10**2))
+    arr = list(range(10**5))
     with Pool(cpu_num) as p:
-        r = list(tqdm.tqdm(p.imap(test_wrapper, arr), total=len(arr)))
+        r = list(tqdm.tqdm(p.imap(train_wrapper, arr), total=len(arr)))
+
+    #arr = list(range(10**2))
+    #with Pool(cpu_num) as p:
+    #    r = list(tqdm.tqdm(p.imap(test_wrapper, arr), total=len(arr)))

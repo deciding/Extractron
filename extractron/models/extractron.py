@@ -6,7 +6,7 @@ from infolog import log
 from extractron.models.Architecture_wrappers import ExtractronDecoderCell
 from extractron.models.custom_decoder import CustomDecoder
 from extractron.models.helpers import ExtractTrainingHelper, ExtractTestHelper
-from extractron.models.modules import Prenet, DecoderRNN, FrameProjection, Postnet
+from extractron.models.modules import Prenet, DecoderRNN, FrameProjection, Postnet, CBHG
 global_seed=None
 
 class Extractron():
@@ -17,31 +17,34 @@ class Extractron():
         self._hparams = hparams
         self._args = args
 
-    def initialize(self, mixed_spec=None, target_spec=None, mixed_phase=None, target_phase=None, spkid_embeddings=None,
+    def initialize(self, mixed_mel=None, target_mel=None, mixed_phase=None, target_phase=None, mixed_linear=None, target_linear=None, spkid_embeddings=None,
                    global_step=None, is_training=False):
 
         hp = self._hparams
 
-        self.tower_mixed_spec = []
-        self.tower_target_spec = []
+        self.tower_mixed_mel = []
+        self.tower_target_mel = []
         self.tower_mixed_phase = []
         self.tower_target_phase = []
+        self.tower_mixed_linear = []
+        self.tower_target_linear = []
         self.tower_spkid_embeddings = []
 
-        batch_size = tf.shape(mixed_spec)[0] // hp.extractron_num_gpus
-        spec_channels = hp.num_freq
+        batch_size = tf.shape(mixed_mel)[0] // hp.extractron_num_gpus
+        #spec_channels = hp.num_freq
+        spec_channels = hp.num_mels
         spkid_embedding_dim = hp.spkid_embedding_dim
 
         #split to tower
         #fill in to the tower
         for i in range(hp.extractron_num_gpus):
-            self.tower_mixed_spec.append(
+            self.tower_mixed_mel.append(
                     tf.reshape(
-                        mixed_spec[i*batch_size:(i+1)*batch_size],
+                        mixed_mel[i*batch_size:(i+1)*batch_size],
                         [batch_size, -1, spec_channels]))
-            self.tower_target_spec.append(
+            self.tower_target_mel.append(
                     tf.reshape(
-                        target_spec[i*batch_size:(i+1)*batch_size],
+                        target_mel[i*batch_size:(i+1)*batch_size],
                         [batch_size, -1, spec_channels]))
             cur_spkid_embeddings = tf.reshape(
                     spkid_embeddings[i*batch_size:(i+1)*batch_size],
@@ -50,12 +53,22 @@ class Extractron():
                 self.tower_mixed_phase.append(
                         tf.reshape(
                             mixed_phase[i*batch_size:(i+1)*batch_size],
-                            [batch_size, -1, spec_channels]))
+                            [batch_size, -1, hp.num_freq]))
             if target_phase is not None:
                 self.tower_target_phase.append(
                         tf.reshape(
                             target_phase[i*batch_size:(i+1)*batch_size],
-                            [batch_size, -1, spec_channels]))
+                            [batch_size, -1, hp.num_freq]))
+            if mixed_linear is not None:
+                self.tower_mixed_linear.append(
+                        tf.reshape(
+                            mixed_linear[i*batch_size:(i+1)*batch_size],
+                            [batch_size, -1, hp.num_freq]))
+            if target_linear is not None:
+                self.tower_target_linear.append(
+                        tf.reshape(
+                            target_linear[i*batch_size:(i+1)*batch_size],
+                            [batch_size, -1, hp.num_freq]))
 
             #cur_spkid_embeddings = tf.expand_dims(
             #    cur_spkid_embeddings, 1)
@@ -69,6 +82,7 @@ class Extractron():
         self.tower_residual=[]
         self.tower_projected_residual=[]
         self.tower_predict_outputs=[]
+        self.tower_linear_outputs=[]
 
         gpus = ["/gpu:{}".format(i) for i in range(hp.extractron_gpu_start_idx,
                                                    hp.extractron_gpu_start_idx+hp.extractron_num_gpus)]
@@ -82,16 +96,16 @@ class Extractron():
                     prenet = Prenet(is_training, layers_sizes=hp.prenet_layers,
                                     drop_rate=hp.extractron_dropout_rate, scope='decoder_prenet')
 
+                    # Frames Projection layer
+                    #TODO: one frame a time
+                    frame_projection = FrameProjection(
+                        spec_channels, scope='linear_transform_projection')
+
                     decoder_lstm = DecoderRNN(is_training,
                             layers=hp.decoder_layers,
                             size=hp.decoder_lstm_units,
                             zoneout=hp.extractron_zoneout_rate,
                             scope='decoder_LSTM')
-
-                    # Frames Projection layer
-                    #TODO: one frame a time
-                    frame_projection = FrameProjection(
-                        hp.num_freq, scope='linear_transform_projection')
 
                     # Decoder Cell ==> [batch_size, decoder_steps, num_mels * r] (after decoding)
                     #TODO: delete attention
@@ -101,22 +115,56 @@ class Extractron():
                         decoder_lstm,
                         frame_projection)
 
+                    if hp.bidirection:
+                        reversed_decoder_lstm = DecoderRNN(is_training,
+                                layers=hp.decoder_layers,
+                                size=hp.decoder_lstm_units,
+                                zoneout=hp.extractron_zoneout_rate,
+                                scope='reversed_decoder_LSTM')
+
+                        # Decoder Cell ==> [batch_size, decoder_steps, num_mels * r] (after decoding)
+                        #TODO: delete attention
+                        #TODO: convolve the context of noisy speech
+                        reversed_decoder_cell = ExtractronDecoderCell(
+                            prenet,
+                            reversed_decoder_lstm,
+                            frame_projection)
+
+
                     # Define the helper for our decoder
                     #TODO: since we are using generative method, thus we need the last output as input
                     if is_training:
                         self.helper = ExtractTrainingHelper(
                             batch_size,
-                            self.tower_mixed_spec[i],
-                            self.tower_target_spec[i],
+                            self.tower_mixed_mel[i],
+                            self.tower_target_mel[i],
                             self.tower_spkid_embeddings[i],
                             hp, global_step)
                     else:
                         self.helper = ExtractTestHelper(
                             batch_size,
-                            tf.shape(self.tower_mixed_spec[i])[1],
-                            self.tower_mixed_spec[i],
+                            tf.shape(self.tower_mixed_mel[i])[1],
+                            self.tower_mixed_mel[i],
                             self.tower_spkid_embeddings[i],
                             hp)
+
+                    if hp.bidirection:
+                        reversed_mixed_mel = tf.reverse(self.tower_mixed_mel[i], [1])
+                        reversed_target_mel = tf.reverse(self.tower_target_mel[i], [1])
+                        if is_training:
+                            self.reversed_helper = ExtractTrainingHelper(
+                                batch_size,
+                                reversed_mixed_mel,
+                                reversed_target_mel,
+                                self.tower_spkid_embeddings[i],
+                                hp, global_step)
+                        else:
+                            self.reversed_helper = ExtractTestHelper(
+                                batch_size,
+                                tf.shape(self.tower_mixed_mel[i])[1],
+                                reversed_mixed_mel,
+                                self.tower_spkid_embeddings[i],
+                                hp)
 
                     # initial decoder state
                     decoder_init_state = decoder_cell.zero_state(
@@ -135,7 +183,26 @@ class Extractron():
                         swap_memory=hp.extractron_swap_with_cpu)
 
                     decoder_output = tf.reshape(
-                        frames_prediction, [batch_size, -1, hp.num_freq])
+                        frames_prediction, [batch_size, -1, spec_channels])
+
+                    if hp.bidirection:
+                        (reversed_frames_prediction, _), reversed_final_decoder_state, _ = dynamic_decode(
+                            CustomDecoder(reversed_decoder_cell, self.reversed_helper,
+                                          decoder_init_state),
+                            impute_finished=hp.impute_finished,
+                            maximum_iterations=max_iters,
+                            swap_memory=hp.extractron_swap_with_cpu)
+
+                        reversed_decoder_output = tf.reshape(
+                            reversed_frames_prediction, [batch_size, -1, spec_channels])
+                        decoder_output = tf.concat([
+                            decoder_output,
+                            tf.reverse(reversed_decoder_output, [1])
+                            ],
+                            axis=-1)
+                        bidirection_projection = FrameProjection(
+                            spec_channels, scope='bidirection_projection')
+                        decoder_output = bidirection_projection(decoder_output)
 
                     # Postnet
                     postnet = Postnet(is_training, hparams=hp,
@@ -148,30 +215,31 @@ class Extractron():
                     # Project residual to same dimension as mel spectrogram
                     # ==> [batch_size, decoder_steps * r, num_mels]
                     residual_projection = FrameProjection(
-                        hp.num_freq, scope='postnet_projection')
+                        spec_channels, scope='postnet_projection')
                     projected_residual = residual_projection(residual)
 
                     # Compute the mel spectrogram
                     predict_outputs = decoder_output + projected_residual
 
-                    #post_cbhg = CBHG(hp.cbhg_kernels, hp.cbhg_conv_channels, hp.cbhg_pool_size, [hp.cbhg_projection, hp.num_mels],
-                    #                 hp.cbhg_projection_kernel_size, hp.cbhg_highwaynet_layers,
-                    #                 hp.cbhg_highway_units, hp.cbhg_rnn_units, is_training, name='CBHG_postnet')
+                    post_cbhg = CBHG(hp.cbhg_kernels, hp.cbhg_conv_channels, hp.cbhg_pool_size, [hp.cbhg_projection, spec_channels],
+                                     hp.cbhg_projection_kernel_size, hp.cbhg_highwaynet_layers,
+                                     hp.cbhg_highway_units, hp.cbhg_rnn_units, is_training, name='CBHG_postnet')
 
-                    ##[batch_size, decoder_steps(mel_frames), cbhg_channels]
-                    #post_outputs = post_cbhg(mel_outputs, None)
+                    #[batch_size, decoder_steps(mel_frames), cbhg_channels]
+                    post_outputs = post_cbhg(predict_outputs, None)
 
-                    ## Linear projection of extracted features to make linear spectrogram
-                    #linear_specs_projection = FrameProjection(
-                    #    hp.num_freq, scope='cbhg_linear_specs_projection')
+                    # Linear projection of extracted features to make linear spectrogram
+                    linear_specs_projection = FrameProjection(
+                        hp.num_freq, scope='cbhg_linear_specs_projection')
 
-                    #linear_outputs = linear_specs_projection(post_outputs)
+                    linear_outputs = linear_specs_projection(post_outputs)
 
                     #saving intermidiate results
                     self.tower_decoder_outputs.append(decoder_output)
                     self.tower_residual.append(residual)
                     self.tower_projected_residual.append(projected_residual)
                     self.tower_predict_outputs.append(predict_outputs)
+                    self.tower_linear_outputs.append(linear_outputs)
             log('initialisation done {}'.format(gpus[i]))
         #============END of all gpus initialization=====================
 
@@ -192,6 +260,8 @@ class Extractron():
                 self.tower_projected_residual[i].shape))
             log('  predicted out:                  {}'.format(
                 self.tower_predict_outputs[i].shape))
+            log('  linear out:                  {}'.format(
+                self.tower_linear_outputs[i].shape))
 
             # 1_000_000 is causing syntax problems for some people?! Python please :)
             log('  Extractron Parameters       {:.3f} Million.'.format(
@@ -208,11 +278,13 @@ class Extractron():
 
         self.tower_before_loss = []
         self.tower_after_loss = []
+        self.tower_linear_loss = []
         self.tower_regularization_loss = []
         self.tower_loss = []
 
         total_before_loss = 0
         total_after_loss = 0
+        total_linear_loss = 0
         total_regularization_loss = 0
         total_loss = 0
 
@@ -226,9 +298,11 @@ class Extractron():
                 with tf.variable_scope('loss'):
                     # Compute loss of predictions before postnet
                     before = tf.losses.mean_squared_error(
-                        self.tower_target_spec[i], self.tower_decoder_outputs[i])
+                        self.tower_target_mel[i], self.tower_decoder_outputs[i])
                     after = tf.losses.mean_squared_error(
-                        self.tower_target_spec[i], self.tower_predict_outputs[i])
+                        self.tower_target_mel[i], self.tower_predict_outputs[i])
+                    linear_loss = tf.losses.mean_squared_error(
+                        self.tower_target_linear[i], self.tower_linear_outputs[i])
                     # Compute the regularization weight
                     reg_weight = hp.extractron_reg_weight
 
@@ -247,19 +321,22 @@ class Extractron():
                     # Compute final loss term
                     self.tower_before_loss.append(before)
                     self.tower_after_loss.append(after)
+                    self.tower_linear_loss.append(linear_loss)
                     self.tower_regularization_loss.append(regularization)
 
-                    loss = before + after + regularization
+                    loss = before + after + linear_loss + regularization
                     self.tower_loss.append(loss)
 
         for i in range(hp.extractron_num_gpus):
             total_before_loss += self.tower_before_loss[i]
             total_after_loss += self.tower_after_loss[i]
+            total_linear_loss += self.tower_linear_loss[i]
             total_regularization_loss += self.tower_regularization_loss[i]
             total_loss += self.tower_loss[i]
 
         self.before_loss = total_before_loss / hp.extractron_num_gpus
         self.after_loss = total_after_loss / hp.extractron_num_gpus
+        self.linear_loss = total_linear_loss / hp.extractron_num_gpus
         self.regularization_loss = total_regularization_loss / hp.extractron_num_gpus
         self.loss = total_loss / hp.extractron_num_gpus
 

@@ -14,7 +14,7 @@ from hparams import hparams_debug_string
 from extractron.feeder import Feeder
 from extractron.models import create_model
 from extractron.utils import ValueWindow
-from datasets.wavernn_audio import Audio
+from datasets.voicefilter_audio import Audio
 #from datasets import audio
 import librosa
 #from utils import plot
@@ -34,10 +34,11 @@ def add_train_stats(model, hparams):
         for i in range(hparams.extractron_num_gpus):
             tf.summary.histogram('predict_outputs %d' %
                                  i, model.tower_predict_outputs[i])
-            tf.summary.histogram('target_spec %d' %
-                                 i, model.tower_target_spec[i])
+            tf.summary.histogram('target_mel %d' %
+                                 i, model.tower_target_mel[i])
         tf.summary.scalar('before_loss', model.before_loss)
         tf.summary.scalar('after_loss', model.after_loss)
+        tf.summary.scalar('linear_loss', model.linear_loss)
 
 
         tf.summary.scalar('regularization_loss', model.regularization_loss)
@@ -55,13 +56,14 @@ def add_train_stats(model, hparams):
 
         return tf.summary.merge_all()
 
-def add_eval_summary(summary_writer, step, before_loss, after_loss, loss,
+def add_eval_summary(summary_writer, step, before_loss, after_loss, linear_loss, loss,
         sample_rate, mixed_wav, target_wav, predicted_wav,
-        mixed_spec_img, target_spec_img, predicted_spec_img):
+        mixed_linear_img, target_linear_img, predicted_linear_img):
     sdr = bss_eval_sources(target_wav, predicted_wav, False)[0][0]
 
     summary_writer.add_scalar('eval_before_loss', before_loss, step)
     summary_writer.add_scalar('eval_after_loss', after_loss, step)
+    summary_writer.add_scalar('eval_linear_loss', linear_loss, step)
     summary_writer.add_scalar('eval_loss', loss, step)
     summary_writer.add_scalar('SDR', sdr, step)
 
@@ -69,9 +71,9 @@ def add_eval_summary(summary_writer, step, before_loss, after_loss, loss,
     summary_writer.add_audio('target_wav', target_wav, step, sample_rate)
     summary_writer.add_audio('predicted_wav', predicted_wav, step, sample_rate)
 
-    summary_writer.add_image('mixed_spectrogram', mixed_spec_img, step, dataformats='HWC')
-    summary_writer.add_image('target_spectrogram', target_spec_img, step, dataformats='HWC')
-    summary_writer.add_image('predicted_spectrogram', predicted_spec_img, step, dataformats='HWC')
+    summary_writer.add_image('mixed_spectrogram', mixed_linear_img, step, dataformats='HWC')
+    summary_writer.add_image('target_spectrogram', target_linear_img, step, dataformats='HWC')
+    summary_writer.add_image('predicted_spectrogram', predicted_linear_img, step, dataformats='HWC')
     summary_writer.flush()
 
 def time_string():
@@ -81,7 +83,10 @@ def model_train_mode(args, feeder, hparams, global_step):
     with tf.variable_scope('Extractron_model', reuse=tf.AUTO_REUSE):
         model_name = 'Extractron'
         model = create_model(model_name, hparams, args)
-        model.initialize(feeder.mixed_spec, feeder.target_spec,
+        model.initialize(mixed_mel=feeder.mixed_mel,
+                target_mel=feeder.target_mel,
+                mixed_linear=feeder.mixed_linear,
+                target_linear=feeder.target_linear,
                 spkid_embeddings=feeder.spkid_embeddings,
                 global_step=global_step, is_training=True)
         model.add_loss(global_step)
@@ -93,15 +98,19 @@ def model_test_mode(args, feeder, hparams, global_step):
     with tf.variable_scope('Extractron_model', reuse=tf.AUTO_REUSE):
         model_name = 'Extractron'
         model = create_model(model_name, hparams)
-        model.initialize(feeder.eval_mixed_spec, feeder.eval_target_spec,
-                         feeder.eval_mixed_phase, feeder.eval_target_phase,
+        model.initialize(mixed_mel=feeder.eval_mixed_mel,
+                         target_mel=feeder.eval_target_mel,
+                         mixed_phase=feeder.eval_mixed_phase,
+                         target_phase=feeder.eval_target_phase,
+                         mixed_linear=feeder.eval_mixed_linear,
+                         target_linear=feeder.eval_target_linear,
                          spkid_embeddings=feeder.eval_spkid_embeddings,
                          global_step=global_step, is_training=False)
         model.add_loss(global_step)
         return model
 
 def train(log_dir, args, hparams):
-    wavernn_audio=Audio(hparams)
+    voicefilter_audio=Audio(hparams)
 
     save_dir = os.path.join(log_dir, 'extract_pretrained')
     plot_dir = os.path.join(log_dir, 'plots')
@@ -160,9 +169,11 @@ def train(log_dir, args, hparams):
                     if hasattr(value, 'keys'):
                         value = DotDict(value)
                     self[key] = value
-        dictkeys=['target_spec', 'mixed_spec', 'spkid_embeddings']
-        eval_dictkeys=['eval_target_spec', 'eval_mixed_spec',
-                'eval_target_phase', 'eval_mixed_phase','eval_spkid_embeddings']
+        dictkeys=['target_linear', 'mixed_linear', 'target_mel', 'mixed_mel', 'spkid_embeddings']
+        eval_dictkeys=['eval_target_linear', 'eval_mixed_linear',
+                'eval_target_phase', 'eval_mixed_phase',
+                'eval_target_mel', 'eval_mixed_mel',
+                'eval_spkid_embeddings']
         feeder_dict=DotDict(dict(zip(dictkeys, feeder.next)))
         feeder_dict.update(DotDict(dict(zip(eval_dictkeys, feeder.eval_next))))
 
@@ -289,21 +300,25 @@ def train(log_dir, args, hparams):
                     eval_losses = []
                     before_losses = []
                     after_losses = []
+                    linear_losses = []
 
                     for i in tqdm(range(args.test_steps)):
                         try:
-                            eloss, before_loss, after_loss, \
-                            mixed_phase, mixed_spec, \
-                            target_phase, target_spec, \
-                            predicted_spec = sess.run([
-                                eval_model.tower_loss[0], eval_model.tower_before_loss[0], eval_model.tower_after_loss[0],
-                                eval_model.tower_mixed_phase[0][0], eval_model.tower_mixed_spec[0][0],
-                                eval_model.tower_target_phase[0][0], eval_model.tower_target_spec[0][0],
-                                eval_model.tower_predict_outputs[0][0]
+                            eloss, before_loss, after_loss, linear_loss, \
+                            mixed_phase, mixed_mel, mixed_linear, \
+                            target_phase, target_mel, target_linear, \
+                            predicted_linear = sess.run([
+                                eval_model.tower_loss[0], eval_model.tower_before_loss[0], eval_model.tower_after_loss[0], eval_model.tower_linear_loss[0],
+                                eval_model.tower_mixed_phase[0][0], eval_model.tower_mixed_mel[0][0],
+                                eval_model.tower_mixed_linear[0][0],
+                                eval_model.tower_target_phase[0][0], eval_model.tower_target_mel[0][0],
+                                eval_model.tower_target_linear[0][0],
+                                eval_model.tower_linear_outputs[0][0]
                             ])
                             eval_losses.append(eloss)
                             before_losses.append(before_loss)
                             after_losses.append(after_loss)
+                            linear_losses.append(linear_loss)
                             #if i==0:
                             #    tmp_phase=mixed_phase
                             #    tmp_spec=mixed_spec
@@ -314,11 +329,12 @@ def train(log_dir, args, hparams):
                     eval_loss = sum(eval_losses) / len(eval_losses)
                     before_loss = sum(before_losses) / len(before_losses)
                     after_loss = sum(after_losses) / len(after_losses)
+                    linear_loss = sum(linear_losses) / len(linear_losses)
 
-                    #mixed_wav = wavernn_audio.spec2wav(tmp_spec, tmp_phase)
-                    mixed_wav = wavernn_audio.spec2wav(mixed_spec, mixed_phase)
-                    target_wav = wavernn_audio.spec2wav(target_spec, target_phase)
-                    predicted_wav = wavernn_audio.spec2wav(predicted_spec, mixed_phase)
+                    #mixed_wav = voicefilter_audio.spec2wav(tmp_spec, tmp_phase)
+                    mixed_wav = voicefilter_audio.spec2wav(mixed_linear, mixed_phase)
+                    target_wav = voicefilter_audio.spec2wav(target_linear, target_phase)
+                    predicted_wav = voicefilter_audio.spec2wav(predicted_linear, mixed_phase)
                     librosa.output.write_wav(os.path.join(
                         eval_wav_dir, 'step-{}-eval-mixed.wav'.format(step)),
                         mixed_wav, hparams.sample_rate)
@@ -335,9 +351,9 @@ def train(log_dir, args, hparams):
                     #audio.save_wav(predicted_wav, os.path.join(
                     #    eval_wav_dir, 'step-{}-eval-predicted.wav'.format(step)), sr=hparams.sample_rate)
 
-                    mixed_spec_img=plot_spectrogram_to_numpy(mixed_spec.T)
-                    target_spec_img=plot_spectrogram_to_numpy(target_spec.T)
-                    predicted_spec_img=plot_spectrogram_to_numpy(predicted_spec.T)
+                    mixed_linear_img=plot_spectrogram_to_numpy(mixed_linear.T)
+                    target_linear_img=plot_spectrogram_to_numpy(target_linear.T)
+                    predicted_linear_img=plot_spectrogram_to_numpy(predicted_linear.T)
 
                     #plot.plot_spectrogram(predicted_spec,
                     #        os.path.join(eval_plot_dir, 'step-{}-eval-spectrogram.png'.format(step)),
@@ -348,9 +364,9 @@ def train(log_dir, args, hparams):
                     log('Writing eval summary!')
 
                     add_eval_summary(xsummary_writer, step,
-                                   before_loss, after_loss, eval_loss,
+                                   before_loss, after_loss, linear_loss, eval_loss,
                                    hparams.sample_rate, mixed_wav, target_wav, predicted_wav,
-                                   mixed_spec_img, target_spec_img, predicted_spec_img)
+                                   mixed_linear_img, target_linear_img, predicted_linear_img)
 
                 if step % args.super_checkpoint_interval == 0 or step == args.extractron_train_steps:
                     # Save model and current global step

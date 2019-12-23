@@ -8,6 +8,7 @@ import numpy as np
 class Audio():
     def __init__(self, hp):
         self.hp = hp
+        self._mel_basis = librosa.filters.mel(hp.sample_rate, hp.n_fft, n_mels=hp.num_mels)
 
     def wav2spec(self, y):
         D = self.stft(y)
@@ -15,6 +16,15 @@ class Audio():
         S, D = self.normalize(S), np.angle(D)
         S, D = S.T, D.T # to make [time, freq]
         return S, D
+
+    def wav2mel(self, y):
+        D = self.stft(y)
+
+        S = np.dot(self._mel_basis, np.abs(D))
+        S = self.amp_to_db(S) - self.hp.ref_level_db
+
+        S = self.normalize(S)
+        return S.T
 
     def spec2wav(self, spectrogram, phase):
         spectrogram, phase = spectrogram.T, phase.T

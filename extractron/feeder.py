@@ -47,8 +47,8 @@ class Feeder:
     def get_map_fn(self, training=True):
         # target, mixed, speaker
         def map_fn(t):
-            t=parse_single_preprocessed_data(t, need_phase=not training)
-            t=decode_single_preprocessed_data(t, self._hparams.num_freq, need_phase=not training)
+            t=parse_single_preprocessed_data(t, need_phase=not training, need_mel=True)
+            t=decode_single_preprocessed_data(t, self._hparams.num_freq, need_phase=not training, num_mels=80, need_mel=True)
             return t
         return map_fn
 
