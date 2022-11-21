@@ -10,7 +10,7 @@ tqdm==4.11.2
 #Unidecode==0.4.20
 #pyaudio==0.2.11
 #sounddevice==0.3.10
-tensorflow-gpu==1.12.0
+tensorflow-gpu==2.9.3
 tensorboardX
 Pillow
 ipykernel
